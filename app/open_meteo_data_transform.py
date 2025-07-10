@@ -1,10 +1,14 @@
 from datetime import datetime, timedelta, UTC
 from collections import namedtuple
+from app.db_models import LocationData
+from app.db_client import engine
 
 from pandas import DataFrame, read_json
+from sqlalchemy.orm import Session
+from sqlalchemy.dialects.postgresql import insert
 
-ResultRow = namedtuple(
-    'ResultRow',
+WeatherStatsNamedTuple = namedtuple(
+    'WeatherStatsNamedTuple',
     [
         # Средняя температура на высоте 2 метров за 24 часа (в градусах Цельсия).
         'avg_temperature_2m_24h',
@@ -86,7 +90,7 @@ ResultRow = namedtuple(
 )
 
 
-def day_data_to_record(day_df: DataFrame, day_record: dict):
+def _day_data_to_record(day_df: DataFrame, day_record: dict):
     if len(day_df) != 24:
         raise Exception('Wrong number of rows')
 
@@ -97,11 +101,16 @@ def day_data_to_record(day_df: DataFrame, day_record: dict):
     daylight_df = day_df[lambda df: (
         df.timestamp >= sunrise) & (df.timestamp < sunset)]
 
-    round_list = lambda df_series, decimal_points: [round(v, decimal_points) for v in df_series]
-    get_mean = lambda df, valuesKey: round(df[valuesKey].mean(), 2)
-    kmh_to_mps = lambda df, valuesKey: [round(v / 1000 / 60, 2) for v in df[valuesKey]]
+    def round_list(df_series, decimal_points): return [
+        int(round(v, decimal_points)) for v in df_series
+    ]
 
-    row = ResultRow(
+    def get_mean(df, valuesKey): return float(round(df[valuesKey].mean(), 2))
+    def kmh_to_mps(df, valuesKey): return [
+        float(round(v / 1000 / 60, 2)) for v in df[valuesKey]
+    ]
+
+    row = WeatherStatsNamedTuple(
         avg_temperature_2m_24h=get_mean(day_df, 'temperature_2m'),
         avg_relative_humidity_2m_24h=get_mean(day_df, 'relative_humidity_2m'),
         avg_dew_point_2m_24h=get_mean(day_df, 'dew_point_2m'),
@@ -111,30 +120,35 @@ def day_data_to_record(day_df: DataFrame, day_record: dict):
         avg_wind_speed_10m_24h=get_mean(day_df, 'wind_speed_10m'),
         avg_wind_speed_80m_24h=get_mean(day_df, 'wind_speed_80m'),
         avg_visibility_24h=get_mean(day_df, 'visibility'),
-        total_rain_24h=day_df.rain.sum(),
-        total_showers_24h=day_df.showers.sum(),
-        total_snowfall_24h=day_df.snowfall.sum(),
+        total_rain_24h=int(day_df.rain.sum()),
+        total_showers_24h=int(day_df.showers.sum()),
+        total_snowfall_24h=int(day_df.snowfall.sum()),
         avg_temperature_2m_daylight=get_mean(daylight_df, 'temperature_2m'),
         avg_relative_humidity_2m_daylight=get_mean(
             daylight_df, 'relative_humidity_2m'),
         avg_dew_point_2m_daylight=get_mean(daylight_df, 'dew_point_2m'),
-        avg_apparent_temperature_daylight=get_mean(daylight_df, 'apparent_temperature'),
+        avg_apparent_temperature_daylight=get_mean(
+            daylight_df, 'apparent_temperature'),
         avg_temperature_80m_daylight=get_mean(daylight_df, 'temperature_80m'),
-        avg_temperature_120m_daylight=get_mean(daylight_df, 'temperature_120m'),
+        avg_temperature_120m_daylight=get_mean(
+            daylight_df, 'temperature_120m'),
         avg_wind_speed_10m_daylight=get_mean(daylight_df, 'wind_speed_10m'),
         avg_wind_speed_80m_daylight=get_mean(daylight_df, 'wind_speed_80m'),
         avg_visibility_daylight=get_mean(daylight_df, 'visibility'),
-        total_rain_daylight=daylight_df.rain.sum(),
-        total_showers_daylight=daylight_df.showers.sum(),
-        total_snowfall_daylight=daylight_df.snowfall.sum(),
+        total_rain_daylight=int(daylight_df.rain.sum()),
+        total_showers_daylight=int(daylight_df.showers.sum()),
+        total_snowfall_daylight=int(daylight_df.snowfall.sum()),
         wind_speed_10m_m_per_s=kmh_to_mps(day_df, 'wind_speed_10m'),
         wind_speed_80m_m_per_s=kmh_to_mps(day_df, 'wind_speed_10m'),
         temperature_2m_celsius=round_list(day_df.temperature_2m, 2),
-        apparent_temperature_celsius=round_list(day_df.apparent_temperature, 2),
+        apparent_temperature_celsius=round_list(
+            day_df.apparent_temperature, 2),
         temperature_80m_celsius=round_list(day_df.temperature_80m, 2),
         temperature_120m_celsius=round_list(day_df.temperature_120m, 2),
-        soil_temperature_0cm_celsius=round_list(day_df.soil_temperature_0cm, 2),
-        soil_temperature_6cm_celsius=round_list(day_df.soil_temperature_6cm, 2),
+        soil_temperature_0cm_celsius=round_list(
+            day_df.soil_temperature_0cm, 2),
+        soil_temperature_6cm_celsius=round_list(
+            day_df.soil_temperature_6cm, 2),
         rain_mm=round_list(day_df.rain, 2),
         showers_mm=round_list(day_df.showers, 2),
         snowfall_mm=round_list(day_df.snowfall, 2),
@@ -149,26 +163,23 @@ def day_data_to_record(day_df: DataFrame, day_record: dict):
 
 
 def transform_dataframes(daily_dataframe: DataFrame, hourly_dataframe: DataFrame) -> DataFrame:
+    """Transform dataframes that was red from json files"""
+
     daily_dataframe.set_index('date', inplace=True)
     hourly_dataframe.set_index('date', inplace=True)
     day_seconds = timedelta(days=1)
-    data = {
-        'date': []
-    }
 
+    result = []
     for day in daily_dataframe.itertuples():
         day_start, day_end = day.Index, day.Index + day_seconds
         day_df = hourly_dataframe[(hourly_dataframe.index >= day_start) & (
             hourly_dataframe.index < day_end)]
-        new_row = day_data_to_record(day_df, day)
-        data['date'].append(day.Index.strftime('%Y-%m-%d'))
-        for index, field_key in enumerate(new_row._fields):
-            if not field_key in data:
-                data[field_key] = []
-            data[field_key].append(new_row[index])
-    result_df = DataFrame(data)
-    
-    return result_df
+        result.append({
+            'date': day_start.strftime('%Y-%m-%d'),
+            'data': _day_data_to_record(day_df, day)
+        })
+
+    return result
 
 
 if __name__ == '__main__':
@@ -179,4 +190,54 @@ if __name__ == '__main__':
         print('Couldnt read data files')
         raise e
 
-    transform_dataframes(daily_dataframe, hourly_dataframe)
+    timezone = 'Asia/Novosibirsk'
+    result_list: list[dict[str, WeatherStatsNamedTuple]] = transform_dataframes(
+        daily_dataframe, hourly_dataframe)
+    
+    df_data = {
+        'date': []
+    }
+    result_records = []
+    longitude, latitude = 55.56, 83.2
+    
+    for row in result_list:
+        [date, data] = list(row.values())
+        
+        # composing DataFrame data
+        df_data['date'].append(date)
+        for index, field_key in enumerate(data._fields):
+            if not field_key in df_data:
+                df_data[field_key] = []
+            df_data[field_key].append(data[index])
+
+        # composing model objects for DB
+        record = {
+            'longitude':longitude,
+            'latitude':latitude,
+            'date':date,
+            'timezone':timezone,
+            'data':data._asdict()
+        }
+        result_records.append(record)
+    
+    with Session(engine) as session:
+        session.begin()
+        try:
+            session.execute(
+                insert(LocationData)
+                    .values(result_records)
+                    .on_conflict_do_nothing(constraint='pk_location_data') # TOFIX: figure out how to handle correctly
+            )
+        except:
+            session.rollback()
+            raise
+        else:
+            session.commit()
+
+    result_df = DataFrame(data=df_data)
+    for idx in range(len(result_df)):
+        day_df = result_df.iloc[idx]
+        with open(f"output/{longitude}_{latitude}_{day_df.date}.json", "w") as json_file:
+            json_file.write(day_df.to_json())
+        with open(f"output/{longitude}_{latitude}_{day_df.date}.csv", "w") as csv_file:
+            csv_file.write(day_df.to_csv())

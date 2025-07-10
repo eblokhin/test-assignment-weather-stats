@@ -5,9 +5,9 @@ from retry_requests import retry
 from openmeteo_sdk.Unit import Unit as UnitType
 from openmeteo_sdk.WeatherApiResponse import WeatherApiResponse
 
-from constants import HourlyParams
-import open_meteo_data_transform as open_meteo_data_transform
-from utils import farhenheits_to_celcius, inches_to_millimeter, knots_to_kmh, feet_to_meter
+from app.constants import HourlyParams
+import app.open_meteo_data_transform as open_meteo_data_transform
+from app.utils import farhenheits_to_celcius, inches_to_millimeter, knots_to_kmh, feet_to_meter
 
 # Setup the Open-Meteo API client with cache and retry on error
 cache_session = requests_cache.CachedSession('.cache', expire_after=3600)
@@ -94,7 +94,7 @@ def combine_dataframes(response: WeatherApiResponse, params: object):
 
     daily_dataframe = pd.DataFrame(data=daily_data)
     
-    return daily_dataframe, hourly_dataframe
+    return daily_dataframe, hourly_dataframe, response.Timezone().decode('utf-8'), response.Longitude(), response.Latitude()
 
 if __name__ == '__main__':
     params = {
@@ -111,7 +111,7 @@ if __name__ == '__main__':
         "precipitation_unit": "inch"
     }
     response = make_request(params)
-    daily_dataframe, hourly_dataframe = combine_dataframes(response, params)
+    daily_dataframe, hourly_dataframe, timezone_name = combine_dataframes(response, params)
     with open("hourly_data.json", "w") as json_file:
         json_file.write(hourly_dataframe.to_json())
     with open("hourly_data.txt", "w") as txt_file:
@@ -120,5 +120,5 @@ if __name__ == '__main__':
         json_file.write(daily_dataframe.to_json())
     with open("daily_data.txt", "w") as txt_file:
         txt_file.write(daily_dataframe.to_string())
-    transformed_data = open_meteo_data_transform.transform_dataframes(daily_dataframe, hourly_dataframe)
+    transformed_data = open_meteo_data_transform.transform_dataframes(daily_dataframe, hourly_dataframe, timezone_name)
 
